@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=HD60 S Capture
+GenericName=Capture Card Viewer
+Comment=Preview, record and take screenshots from an Elgato Game Capture HD60 S
+Exec=/usr/bin/hd60s-capture
+Icon=camera-video-symbolic
+Terminal=false
+Categories=AudioVideo;Video;Recorder;
+Keywords=Elgato;Game Capture;HD60 S;Capture Card;Recording;
+StartupNotify=true
+SingleMainWindow=true

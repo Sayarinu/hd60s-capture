@@ -1,0 +1,2 @@
+#!/bin/sh
+PYTHONPATH=/usr/lib/hd60s-capture exec /usr/bin/python -P -m elgato_capture "$@"

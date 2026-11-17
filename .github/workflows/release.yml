@@ -1,0 +1,43 @@
+name: Release Arch package
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check tag and package version
+        run: |
+          version=$(sed -n 's/^pkgver=//p' PKGBUILD)
+          if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || $GITHUB_REF_NAME != "v$version" ]]; then
+            echo "Expected a vX.Y.Z tag matching pkgver in PKGBUILD" >&2
+            exit 1
+          fi
+      - name: Build and check the Arch package
+        run: |
+          docker run --rm --env BUILD_UID="$(id -u)" \
+            --mount "type=bind,source=$PWD,target=/build" --workdir /build \
+            archlinux:base-devel bash -euc '
+              pacman -Syu --noconfirm --needed python desktop-file-utils
+              useradd --create-home --uid "$BUILD_UID" builder
+              runuser -u builder -- makepkg --nodeps --noconfirm
+              pacman -Qip ./*.pkg.tar.zst
+            '
+          sha256sum ./*.pkg.tar.zst > SHA256SUMS
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" ./*.pkg.tar.zst SHA256SUMS --verify-tag --generate-notes
