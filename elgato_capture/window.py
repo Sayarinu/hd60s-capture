@@ -24,6 +24,10 @@ CSS = b"""
 .rec-dot { color: #ff3b30; }
 """
 
+REVEAL_EDGE = 4  # px from the top of the screen that reveals the header in fullscreen
+HIDE_BARS_MS = 600
+HIDE_CURSOR_MS = 2000
+
 STATUS = {
     NO_DEVICE: (
         "media-removable-symbolic",
@@ -57,6 +61,7 @@ class CaptureWindow(Adw.ApplicationWindow):
         self.set_default_size(settings["width"], settings["height"])
         self.set_icon_name(pipeline.ICON_NAME)
         self._hide_bars_id = 0
+        self._hide_cursor_id = 0
         self._rec_timer = 0
         self._syncing_volume = False
 
@@ -92,7 +97,7 @@ class CaptureWindow(Adw.ApplicationWindow):
     # ------------------------------------------------------------------ UI
 
     def _build_ui(self):
-        header = Adw.HeaderBar()
+        header = self.header = Adw.HeaderBar()
 
         self.record_button = Gtk.ToggleButton(icon_name="media-record-symbolic")
         self.record_button.set_tooltip_text("Record (F9)")
@@ -116,9 +121,15 @@ class CaptureWindow(Adw.ApplicationWindow):
         about = Gio.Menu()
         about.append("Keyboard Shortcuts", "win.shortcuts")
         menu.append_section(None, about)
-        menu_button = Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu)
+        menu_button = self.menu_button = Gtk.MenuButton(icon_name="open-menu-symbolic",
+                                                         menu_model=menu)
         menu_button.set_tooltip_text("Menu")
         header.pack_end(menu_button)
+
+        self.fullscreen_button = Gtk.Button(icon_name="view-fullscreen-symbolic",
+                                            tooltip_text="Fullscreen (F11)")
+        self.fullscreen_button.set_action_name("win.fullscreen")
+        header.pack_end(self.fullscreen_button)
 
         self.volume = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 1, 0.01)
         self.volume.set_draw_value(False)
@@ -162,9 +173,6 @@ class CaptureWindow(Adw.ApplicationWindow):
         double_click = Gtk.GestureClick()
         double_click.connect("pressed", self._on_video_pressed)
         video.add_controller(double_click)
-        motion = Gtk.EventControllerMotion()
-        motion.connect("motion", self._on_motion)
-        video.add_controller(motion)
 
         # Status page
         self.status = Adw.StatusPage()
@@ -179,6 +187,11 @@ class CaptureWindow(Adw.ApplicationWindow):
         self.toolbar.add_top_bar(header)
         self.set_content(self.toolbar)
         self._update_mute_icon()
+
+        # Tracked on the whole window so the pointer is still seen over the header.
+        motion = Gtk.EventControllerMotion()
+        motion.connect("motion", self._on_motion)
+        self.add_controller(motion)
 
     def _install_actions(self, app):
         def add(name, callback, accels=(), state=None):
@@ -214,9 +227,6 @@ class CaptureWindow(Adw.ApplicationWindow):
     def _on_state(self, _capture, state):
         if state == LIVE:
             self.stack.set_visible_child_name("video")
-            self.toolbar.set_reveal_top_bars(not self.is_fullscreen())
-            if self.is_fullscreen():
-                self._schedule_hide_bars()
         else:
             icon, title, description = STATUS[state]
             if icon:
@@ -227,8 +237,7 @@ class CaptureWindow(Adw.ApplicationWindow):
             self.status.set_title(title)
             self.status.set_description(description)
             self.stack.set_visible_child_name("status")
-            self.toolbar.set_reveal_top_bars(True)
-            self.set_cursor(None)
+        self._update_bars(reveal=False)
         self._update_live_actions()
 
     def _update_live_actions(self):
@@ -324,33 +333,73 @@ class CaptureWindow(Adw.ApplicationWindow):
             self.fullscreen()
 
     def _on_fullscreen_changed(self, *_):
-        if self.is_fullscreen() and self.capture.state == LIVE:
-            self._schedule_hide_bars()
-        else:
-            self.toolbar.set_reveal_top_bars(True)
-            self.set_cursor(None)
+        full = self.is_fullscreen()
+        self.fullscreen_button.set_icon_name(
+            "view-restore-symbolic" if full else "view-fullscreen-symbolic")
+        self.fullscreen_button.set_tooltip_text(
+            "Leave fullscreen (F11)" if full else "Fullscreen (F11)")
+        self._update_bars(reveal=False)
 
     def _on_video_pressed(self, gesture, n_press, _x, _y):
         if n_press == 2:
             self.toggle_fullscreen()
 
-    def _on_motion(self, *_):
-        if self.is_fullscreen():
+    def _immersive(self):
+        """Fullscreen with live video: the header auto-hides over the picture."""
+        return self.is_fullscreen() and self.capture.state == LIVE
+
+    def _update_bars(self, reveal=None):
+        """Show or hide the header. In immersive mode it floats over the video and
+        only appears when the pointer touches the top edge of the screen."""
+        immersive = self._immersive()
+        self.toolbar.set_extend_content_to_top_edge(immersive)
+        self._cancel("_hide_bars_id")
+        if not immersive:
+            self._cancel("_hide_cursor_id")
             self.toolbar.set_reveal_top_bars(True)
             self.set_cursor(None)
-            self._schedule_hide_bars()
+            return
+        if reveal is not None:
+            self.toolbar.set_reveal_top_bars(reveal)
+        if not self.toolbar.get_reveal_top_bars():
+            self._schedule_hide_cursor()
 
-    def _schedule_hide_bars(self):
-        if self._hide_bars_id:
-            GLib.source_remove(self._hide_bars_id)
-        self._hide_bars_id = GLib.timeout_add(2000, self._hide_bars)
+    def _on_motion(self, _controller, _x, y):
+        if not self._immersive():
+            return
+        self.set_cursor(None)
+        if not self.toolbar.get_reveal_top_bars():
+            if y <= REVEAL_EDGE:
+                self._update_bars(reveal=True)
+            else:
+                self._schedule_hide_cursor()
+        elif y <= self.header.get_height() + REVEAL_EDGE or self.menu_button.get_active():
+            self._cancel("_hide_bars_id", "_hide_cursor_id")
+        elif not self._hide_bars_id:
+            self._hide_bars_id = GLib.timeout_add(HIDE_BARS_MS, self._hide_bars)
 
     def _hide_bars(self):
         self._hide_bars_id = 0
-        if self.is_fullscreen() and self.capture.state == LIVE:
-            self.toolbar.set_reveal_top_bars(False)
+        if self._immersive() and not self.menu_button.get_active():
+            self._update_bars(reveal=False)
+        return GLib.SOURCE_REMOVE
+
+    def _schedule_hide_cursor(self):
+        self._cancel("_hide_cursor_id")
+        self._hide_cursor_id = GLib.timeout_add(HIDE_CURSOR_MS, self._hide_cursor)
+
+    def _hide_cursor(self):
+        self._hide_cursor_id = 0
+        if self._immersive() and not self.toolbar.get_reveal_top_bars():
             self.set_cursor(Gdk.Cursor.new_from_name("none"))
         return GLib.SOURCE_REMOVE
+
+    def _cancel(self, *attrs):
+        for attr in attrs:
+            source = getattr(self, attr)
+            if source:
+                GLib.source_remove(source)
+                setattr(self, attr, 0)
 
     def toggle_info(self):
         show = not self.settings["show_info"]
@@ -457,7 +506,8 @@ class CaptureWindow(Adw.ApplicationWindow):
             heading="Keyboard Shortcuts",
             body="F9\tStart / stop recording\n"
                  "F12\tScreenshot\n"
-                 "F11 or F\tFullscreen (double-click works too)\n"
+                 "F11 or F\tFullscreen (double-click works too;\n"
+                 "\tmove the pointer to the top edge for the menu)\n"
                  "Esc\tLeave fullscreen\n"
                  "M\tMute\n"
                  "I\tSignal info\n"
